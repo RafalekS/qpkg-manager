@@ -174,21 +174,11 @@ Press OK to begin." 22 54
 }
 
 screen_package_info() {
-    local result
     while true; do
-        result=$(ask --title "Package Identity" \
-            --form "Package details (no spaces in Name):" 16 60 4 \
-            "Name:"         1 1 "${PKG_NAME:-MyApp}"     1 17 30 40 \
-            "Display Name:" 2 1 "${PKG_DISPLAY:-My App}" 2 17 30 80 \
-            "Version:"      3 1 "${PKG_VERSION:-1.0.0}"  3 17 30 20 \
-            "Summary:"      4 1 "${PKG_SUMMARY:-}"       4 17 30 80 \
+        PKG_NAME=$(ask --title "Package Name" \
+            --inputbox "Package name (no spaces, alphanumeric + dash/underscore):" 10 60 \
+            "${PKG_NAME:-MyApp}" \
         ) || return 1
-
-        # Parse form output (one field per line)
-        PKG_NAME=$(echo "$result" | sed -n '1p' | tr -d ' ')
-        PKG_DISPLAY=$(echo "$result" | sed -n '2p')
-        PKG_VERSION=$(echo "$result" | sed -n '3p')
-        PKG_SUMMARY=$(echo "$result" | sed -n '4p')
 
         # Validate
         if [ -z "$PKG_NAME" ]; then
@@ -199,24 +189,42 @@ screen_package_info() {
             show_error "Package Name must be alphanumeric (plus - and _). No spaces!"
             continue
         fi
-        [ -z "$PKG_DISPLAY" ] && PKG_DISPLAY="$PKG_NAME"
-        [ -z "$PKG_VERSION" ] && PKG_VERSION="1.0.0"
         break
     done
+
+    PKG_DISPLAY=$(ask --title "Display Name" \
+        --inputbox "Display name (shown in App Center):" 10 60 \
+        "${PKG_DISPLAY:-$PKG_NAME}" \
+    ) || return 1
+    [ -z "$PKG_DISPLAY" ] && PKG_DISPLAY="$PKG_NAME"
+
+    PKG_VERSION=$(ask --title "Version" \
+        --inputbox "Version number:" 10 40 \
+        "${PKG_VERSION:-1.0.0}" \
+    ) || return 1
+    [ -z "$PKG_VERSION" ] && PKG_VERSION="1.0.0"
+
+    PKG_SUMMARY=$(ask --title "Summary" \
+        --inputbox "Short description:" 10 60 \
+        "${PKG_SUMMARY:-}" \
+    ) || return 1
 }
 
 screen_author() {
-    local result
-    result=$(ask --title "Author & License" \
-        --form "Who made this?" 12 60 2 \
-        "Author:"  1 1 "${PKG_AUTHOR:-$DEF_AUTHOR}" 1 10 40 80 \
-        "License:" 2 1 "${PKG_LICENSE:-$DEF_LICENSE}" 2 10 40 40 \
+    PKG_AUTHOR=$(ask --title "Author" \
+        --inputbox "Package author:" 10 60 \
+        "${PKG_AUTHOR:-$DEF_AUTHOR}" \
     ) || return 1
-
-    PKG_AUTHOR=$(echo "$result" | sed -n '1p')
-    PKG_LICENSE=$(echo "$result" | sed -n '2p')
     [ -z "$PKG_AUTHOR" ] && PKG_AUTHOR="$DEF_AUTHOR"
-    [ -z "$PKG_LICENSE" ] && PKG_LICENSE="$DEF_LICENSE"
+
+    PKG_LICENSE=$(ask --title "License" \
+        --menu "License:" 14 50 5 \
+        "MIT"       "MIT License" \
+        "Apache"    "Apache 2.0" \
+        "GPLv2"     "GNU GPL v2" \
+        "GPLv3"     "GNU GPL v3" \
+        "Other"     "Other / Proprietary" \
+    ) || return 1
 }
 
 screen_binary_source() {
@@ -266,19 +274,16 @@ screen_binary_source() {
 }
 
 screen_service_config() {
-    local result
-    result=$(ask --title "Service Configuration" \
-        --form "How does the binary run?" 14 65 3 \
-        "Port:"       1 1 "${SVC_PORT:-$DEF_PORT}"  1 17 10 5 \
-        "Start args:" 2 1 "${SVC_ARGS:-}"            2 17 40 200 \
-        "Binary name:" 3 1 "${BIN_FILENAME}"          3 17 40 80 \
+    SVC_PORT=$(ask --title "Service Port" \
+        --inputbox "Port number the service listens on:" 10 50 \
+        "${SVC_PORT:-$DEF_PORT}" \
     ) || return 1
-
-    SVC_PORT=$(echo "$result" | sed -n '1p')
-    SVC_ARGS=$(echo "$result" | sed -n '2p')
-    # line 3 is just for display, binary name already set
-
     [ -z "$SVC_PORT" ] && SVC_PORT="$DEF_PORT"
+
+    SVC_ARGS=$(ask --title "Start Arguments" \
+        --inputbox "Start arguments (e.g. 'web --port 3004'), or leave empty:" 10 65 \
+        "${SVC_ARGS:-}" \
+    ) || return 1
 }
 
 screen_run_as() {
