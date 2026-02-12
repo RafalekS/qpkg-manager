@@ -1,0 +1,90 @@
+#!/bin/bash
+# Package routines for Gitea QPKG
+
+GITEA_USER="rls1203"
+
+pkg_pre_install() {
+    # Nothing needed before extraction
+    return 0
+}
+
+pkg_install() {
+    # Nothing custom during install
+    return 0
+}
+
+pkg_post_install() {
+    local QPKG_ROOT
+    QPKG_ROOT=$(/sbin/getcfg Gitea Install_Path -f /etc/config/qpkg.conf)
+
+    # Make binary executable
+    chmod +x "${QPKG_ROOT}/gitea"
+
+    # Create data directories
+    mkdir -p "${QPKG_ROOT}/custom/conf"
+    mkdir -p "${QPKG_ROOT}/data"
+    mkdir -p "${QPKG_ROOT}/log"
+    mkdir -p "${QPKG_ROOT}/repositories"
+
+    # Set ownership so rls1203 can write
+    chown -R ${GITEA_USER}:everyone "${QPKG_ROOT}/custom"
+    chown -R ${GITEA_USER}:everyone "${QPKG_ROOT}/data"
+    chown -R ${GITEA_USER}:everyone "${QPKG_ROOT}/log"
+    chown -R ${GITEA_USER}:everyone "${QPKG_ROOT}/repositories"
+
+    # Create initial config if not present (preserve across upgrades)
+    if [ ! -f "${QPKG_ROOT}/custom/conf/app.ini" ]; then
+        cat > "${QPKG_ROOT}/custom/conf/app.ini" << EOCONF
+; Gitea Configuration for QNAP TS-464
+; Docs: https://docs.gitea.com/administration/config-cheat-sheet
+
+[server]
+HTTP_PORT        = 3004
+ROOT_URL         = http://192.168.0.166:3004/
+APP_DATA_PATH    = ${QPKG_ROOT}/data
+LFS_START_SERVER = true
+
+[database]
+DB_TYPE  = sqlite3
+PATH     = ${QPKG_ROOT}/data/gitea.db
+
+[repository]
+ROOT = ${QPKG_ROOT}/repositories
+
+[log]
+ROOT_PATH = ${QPKG_ROOT}/log
+MODE      = file
+LEVEL     = info
+
+[security]
+INSTALL_LOCK = false
+EOCONF
+        chown ${GITEA_USER}:everyone "${QPKG_ROOT}/custom/conf/app.ini"
+    fi
+
+    # Make service script executable
+    chmod +x "${QPKG_ROOT}/Gitea.sh"
+
+    return 0
+}
+
+pkg_pre_remove() {
+    # Stop service before removal
+    local QPKG_ROOT
+    QPKG_ROOT=$(/sbin/getcfg Gitea Install_Path -f /etc/config/qpkg.conf)
+    if [ -f "${QPKG_ROOT}/gitea.pid" ]; then
+        local pid
+        pid=$(cat "${QPKG_ROOT}/gitea.pid" 2>/dev/null)
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+        sleep 2
+    fi
+    return 0
+}
+
+pkg_main_remove() {
+    return 0
+}
+
+pkg_post_remove() {
+    return 0
+}

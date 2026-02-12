@@ -1,0 +1,10 @@
+# Binaries
+*.qpkg
+Gitea/gitea
+Gitea/qpkg/x86_64/
+
+# Build output
+build/
+
+# Personal/sensitive data
+*-recon.txt
