@@ -39,12 +39,11 @@ check_deps() {
     fi
 }
 
-# dialog wrapper: runs dialog, captures output, returns exit code
+# Run dialog and capture result to TMPFILE.
+# NEVER call inside $(...) - dialog needs stdout for the terminal.
+# After calling, read result with: result=$(cat "$TMPFILE")
 ask() {
     $DIALOG "$@" 2>"$TMPFILE"
-    local rc=$?
-    cat "$TMPFILE"
-    return $rc
 }
 
 # Show error in dialog
@@ -175,12 +174,12 @@ Press OK to begin." 22 54
 
 screen_package_info() {
     while true; do
-        PKG_NAME=$(ask --title "Package Name" \
+        ask --title "Package Name" \
             --inputbox "Package name (no spaces, alphanumeric + dash/underscore):" 10 60 \
-            "${PKG_NAME:-MyApp}" \
-        ) || return 1
+            "${PKG_NAME:-MyApp}"
+        [ $? -ne 0 ] && return 1
+        PKG_NAME=$(cat "$TMPFILE")
 
-        # Validate
         if [ -z "$PKG_NAME" ]; then
             show_error "Package Name is required!"
             continue
@@ -192,58 +191,62 @@ screen_package_info() {
         break
     done
 
-    PKG_DISPLAY=$(ask --title "Display Name" \
+    ask --title "Display Name" \
         --inputbox "Display name (shown in App Center):" 10 60 \
-        "${PKG_DISPLAY:-$PKG_NAME}" \
-    ) || return 1
+        "${PKG_DISPLAY:-$PKG_NAME}"
+    [ $? -ne 0 ] && return 1
+    PKG_DISPLAY=$(cat "$TMPFILE")
     [ -z "$PKG_DISPLAY" ] && PKG_DISPLAY="$PKG_NAME"
 
-    PKG_VERSION=$(ask --title "Version" \
+    ask --title "Version" \
         --inputbox "Version number:" 10 40 \
-        "${PKG_VERSION:-1.0.0}" \
-    ) || return 1
+        "${PKG_VERSION:-1.0.0}"
+    [ $? -ne 0 ] && return 1
+    PKG_VERSION=$(cat "$TMPFILE")
     [ -z "$PKG_VERSION" ] && PKG_VERSION="1.0.0"
 
-    PKG_SUMMARY=$(ask --title "Summary" \
+    ask --title "Summary" \
         --inputbox "Short description:" 10 60 \
-        "${PKG_SUMMARY:-}" \
-    ) || return 1
+        "${PKG_SUMMARY:-}"
+    [ $? -ne 0 ] && return 1
+    PKG_SUMMARY=$(cat "$TMPFILE")
 }
 
 screen_author() {
-    PKG_AUTHOR=$(ask --title "Author" \
+    ask --title "Author" \
         --inputbox "Package author:" 10 60 \
-        "${PKG_AUTHOR:-$DEF_AUTHOR}" \
-    ) || return 1
+        "${PKG_AUTHOR:-$DEF_AUTHOR}"
+    [ $? -ne 0 ] && return 1
+    PKG_AUTHOR=$(cat "$TMPFILE")
     [ -z "$PKG_AUTHOR" ] && PKG_AUTHOR="$DEF_AUTHOR"
 
-    PKG_LICENSE=$(ask --title "License" \
+    ask --title "License" \
         --menu "License:" 14 50 5 \
         "MIT"       "MIT License" \
         "Apache"    "Apache 2.0" \
         "GPLv2"     "GNU GPL v2" \
         "GPLv3"     "GNU GPL v3" \
-        "Other"     "Other / Proprietary" \
-    ) || return 1
+        "Other"     "Other / Proprietary"
+    [ $? -ne 0 ] && return 1
+    PKG_LICENSE=$(cat "$TMPFILE")
 }
 
 screen_binary_source() {
-    local choice
-    choice=$(ask --title "Binary Source" \
+    ask --title "Binary Source" \
         --menu "Where is the binary?" 12 55 3 \
         "local"    "Local file path" \
         "url"      "Download from URL" \
-        "later"    "I will copy it manually later" \
-    ) || return 1
+        "later"    "I will copy it manually later"
+    [ $? -ne 0 ] && return 1
+    BIN_SOURCE=$(cat "$TMPFILE")
 
-    BIN_SOURCE="$choice"
-
-    case "$choice" in
+    case "$BIN_SOURCE" in
         local)
-            BIN_PATH=$(ask --title "Binary Path" \
+            ask --title "Binary Path" \
                 --inputbox "Full path to the binary file:" 10 60 \
-                "${BIN_PATH:-}" \
-            ) || return 1
+                "${BIN_PATH:-}"
+            [ $? -ne 0 ] && return 1
+            BIN_PATH=$(cat "$TMPFILE")
             if [ ! -f "$BIN_PATH" ]; then
                 show_error "File not found: $BIN_PATH"
                 screen_binary_source
@@ -252,20 +255,24 @@ screen_binary_source() {
             BIN_FILENAME=$(basename "$BIN_PATH")
             ;;
         url)
-            BIN_URL=$(ask --title "Binary URL" \
+            ask --title "Binary URL" \
                 --inputbox "Download URL for the binary:" 10 70 \
-                "${BIN_URL:-}" \
-            ) || return 1
-            BIN_FILENAME=$(ask --title "Binary Filename" \
+                "${BIN_URL:-}"
+            [ $? -ne 0 ] && return 1
+            BIN_URL=$(cat "$TMPFILE")
+
+            ask --title "Binary Filename" \
                 --inputbox "Save as filename (e.g. myapp):" 10 50 \
-                "${BIN_FILENAME:-$(basename "$BIN_URL" | sed 's/?.*//')}" \
-            ) || return 1
+                "${BIN_FILENAME:-$(basename "$BIN_URL" | sed 's/?.*//')}"
+            [ $? -ne 0 ] && return 1
+            BIN_FILENAME=$(cat "$TMPFILE")
             ;;
         later)
-            BIN_FILENAME=$(ask --title "Binary Filename" \
+            ask --title "Binary Filename" \
                 --inputbox "What will the binary be called? (e.g. myapp):" 10 55 \
-                "${BIN_FILENAME:-$PKG_NAME}" \
-            ) || return 1
+                "${BIN_FILENAME:-$PKG_NAME}"
+            [ $? -ne 0 ] && return 1
+            BIN_FILENAME=$(cat "$TMPFILE")
             ;;
     esac
 
@@ -274,36 +281,40 @@ screen_binary_source() {
 }
 
 screen_service_config() {
-    SVC_PORT=$(ask --title "Service Port" \
+    ask --title "Service Port" \
         --inputbox "Port number the service listens on:" 10 50 \
-        "${SVC_PORT:-$DEF_PORT}" \
-    ) || return 1
+        "${SVC_PORT:-$DEF_PORT}"
+    [ $? -ne 0 ] && return 1
+    SVC_PORT=$(cat "$TMPFILE")
     [ -z "$SVC_PORT" ] && SVC_PORT="$DEF_PORT"
 
-    SVC_ARGS=$(ask --title "Start Arguments" \
+    ask --title "Start Arguments" \
         --inputbox "Start arguments (e.g. 'web --port 3004'), or leave empty:" 10 65 \
-        "${SVC_ARGS:-}" \
-    ) || return 1
+        "${SVC_ARGS:-}"
+    [ $? -ne 0 ] && return 1
+    SVC_ARGS=$(cat "$TMPFILE")
 }
 
 screen_run_as() {
-    local choice
-    choice=$(ask --title "Run As User" \
+    ask --title "Run As User" \
         --menu "Which user should the service run as?" 13 60 3 \
         "root"    "Run as root (simpler, some apps allow it)" \
         "user"    "Run as specific user (safer, required by some apps)" \
-        "current" "Run as current user ($(id -un))" \
-    ) || return 1
+        "current" "Run as current user ($(id -un))"
+    [ $? -ne 0 ] && return 1
+    local choice
+    choice=$(cat "$TMPFILE")
 
     case "$choice" in
         root)
             RUN_AS_USER="root"
             ;;
         user)
-            RUN_AS_USER=$(ask --title "Username" \
+            ask --title "Username" \
                 --inputbox "Which user?" 10 40 \
-                "${RUN_AS_USER:-rls1203}" \
-            ) || return 1
+                "${RUN_AS_USER:-rls1203}"
+            [ $? -ne 0 ] && return 1
+            RUN_AS_USER=$(cat "$TMPFILE")
             ;;
         current)
             RUN_AS_USER=$(id -un)
@@ -314,14 +325,13 @@ screen_run_as() {
 screen_webui() {
     $DIALOG --title "Web UI" \
         --yesno "Does this application have a web interface?" 8 50
-    local rc=$?
-
-    if [ $rc -eq 0 ]; then
+    if [ $? -eq 0 ]; then
         HAS_WEBUI="yes"
-        WEBUI_PATH=$(ask --title "Web UI Path" \
+        ask --title "Web UI Path" \
             --inputbox "URL path (e.g. / or /app/):" 10 50 \
-            "${WEBUI_PATH:-/}" \
-        ) || return 1
+            "${WEBUI_PATH:-/}"
+        [ $? -ne 0 ] && return 1
+        WEBUI_PATH=$(cat "$TMPFILE")
     else
         HAS_WEBUI="no"
         WEBUI_PATH=""
@@ -331,13 +341,12 @@ screen_webui() {
 screen_icon() {
     $DIALOG --title "Custom Icon" \
         --yesno "Do you have a custom icon file? (64x64 PNG or GIF)\n\nIf no, placeholder icons will be generated." 10 55
-    local rc=$?
-
-    if [ $rc -eq 0 ]; then
-        ICON_PATH=$(ask --title "Icon Path" \
+    if [ $? -eq 0 ]; then
+        ask --title "Icon Path" \
             --inputbox "Full path to icon file:" 10 60 \
-            "${ICON_PATH:-}" \
-        ) || return 1
+            "${ICON_PATH:-}"
+        [ $? -ne 0 ] && return 1
+        ICON_PATH=$(cat "$TMPFILE")
         if [ ! -f "$ICON_PATH" ]; then
             show_error "File not found: $ICON_PATH\nPlaceholder icons will be used."
             ICON_PATH=""
@@ -355,10 +364,11 @@ screen_output_dir() {
         default_dir="$(pwd)"
     fi
 
-    OUTPUT_DIR=$(ask --title "Output Directory" \
+    ask --title "Output Directory" \
         --inputbox "Where to create the QPKG project folder?\n(A '${PKG_NAME}' subfolder will be created)" 12 60 \
-        "${OUTPUT_DIR:-$default_dir}" \
-    ) || return 1
+        "${OUTPUT_DIR:-$default_dir}"
+    [ $? -ne 0 ] && return 1
+    OUTPUT_DIR=$(cat "$TMPFILE")
 }
 
 screen_summary() {
