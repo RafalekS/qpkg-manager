@@ -20,7 +20,7 @@ TMPFILE=$(mktemp /tmp/qpkg-builder.XXXXXX)
 trap "rm -f $TMPFILE" EXIT
 
 # --- Defaults ----------------------------------------------------------------
-DEF_AUTHOR="RLS SAP Security Ltd."
+DEF_AUTHOR="Anon"
 DEF_LICENSE="MIT"
 DEF_QTS_MIN="5.0.0"
 DEF_PORT="8080"
