@@ -157,19 +157,25 @@ Welcome to the QPKG Package Builder!
 This wizard will create a complete QPKG project
 structure for your binary application.
 
-The generated package will include:
- - qpkg.cfg (package metadata)
- - Service script (start/stop/restart)
- - Package install routines
- - Build script for qbuild
- - Placeholder icons
+Supports two modes:
+ - Service: daemon with start/stop, port, boot
+ - Standalone: CLI tool, just install the binary
 
 QNAP quirks are handled automatically:
  - No su (uses sudo -u)
  - No nohup (uses bash &)
  - Proper privilege dropping
 
-Press OK to begin." 22 54
+Press OK to begin." 21 54
+}
+
+screen_app_type() {
+    ask --title "Application Type" \
+        --menu "What kind of application is this?" 14 62 3 \
+        "service"    "Background service/daemon (e.g. Gitea, Plex)" \
+        "standalone" "CLI tool / standalone binary (e.g. ffmpeg, jq)"
+    [ $? -ne 0 ] && return 1
+    APP_TYPE=$(cat "$TMPFILE")
 }
 
 screen_package_info() {
@@ -372,9 +378,6 @@ screen_output_dir() {
 }
 
 screen_summary() {
-    local webui_info="No"
-    [ "$HAS_WEBUI" = "yes" ] && webui_info="Yes (port ${SVC_PORT}, path ${WEBUI_PATH})"
-
     local bin_info
     case "$BIN_SOURCE" in
         local) bin_info="$BIN_PATH" ;;
@@ -382,25 +385,36 @@ screen_summary() {
         later) bin_info="(manual copy later)" ;;
     esac
 
-    $DIALOG --title "Summary - Confirm" \
-        --yesno "\
+    local summary_text="\
 Package:    ${PKG_NAME} v${PKG_VERSION}
 Display:    ${PKG_DISPLAY}
 Summary:    ${PKG_SUMMARY}
 Author:     ${PKG_AUTHOR}
 License:    ${PKG_LICENSE}
+Type:       ${APP_TYPE}
 
 Binary:     ${bin_info}
-Filename:   ${BIN_FILENAME}
+Filename:   ${BIN_FILENAME}"
+
+    if [ "$APP_TYPE" = "service" ]; then
+        local webui_info="No"
+        [ "$HAS_WEBUI" = "yes" ] && webui_info="Yes (port ${SVC_PORT}, path ${WEBUI_PATH})"
+        summary_text="${summary_text}
 Port:       ${SVC_PORT}
 Start args: ${SVC_ARGS:-none}
 Run as:     ${RUN_AS_USER}
-Web UI:     ${webui_info}
+Web UI:     ${webui_info}"
+    fi
+
+    summary_text="${summary_text}
 Icon:       ${ICON_PATH:-placeholder}
 
 Output:     ${OUTPUT_DIR}/${PKG_NAME}/
 
-Proceed with generation?" 24 62
+Proceed with generation?"
+
+    $DIALOG --title "Summary - Confirm" \
+        --yesno "$summary_text" 24 62
 }
 
 # --- File Generation ---------------------------------------------------------
@@ -419,10 +433,15 @@ QPKG_LICENSE="${PKG_LICENSE}"
 
 # Service management
 QPKG_SERVICE_PROGRAM="${PKG_NAME}.sh"
+EOF
+
+    if [ "$APP_TYPE" = "service" ]; then
+        cat >> "$out" << EOF
 QPKG_SERVICE_PORT="${SVC_PORT}"
 QPKG_RC_NUM="${DEF_RC_NUM}"
 QPKG_TIMEOUT="${DEF_TIMEOUT}"
 EOF
+    fi
 
     if [ "$HAS_WEBUI" = "yes" ]; then
         cat >> "$out" << EOF
@@ -445,6 +464,50 @@ EOF
 
 generate_service_script() {
     local out="$1/shared/${PKG_NAME}.sh"
+
+    if [ "$APP_TYPE" = "standalone" ]; then
+        generate_standalone_script "$out"
+    else
+        generate_daemon_script "$out"
+    fi
+    chmod +x "$out"
+}
+
+generate_standalone_script() {
+    local out="$1"
+    cat > "$out" << SVCEOF
+#!/bin/bash
+# Stub service script for ${PKG_NAME} QPKG (standalone tool)
+# QTS calls this with: start | stop | restart
+# This is a standalone binary - no daemon to manage.
+
+CONF="/etc/config/qpkg.conf"
+QPKG_NAME="${PKG_NAME}"
+QPKG_ROOT=\$(/sbin/getcfg \$QPKG_NAME Install_Path -f \${CONF})
+
+case "\$1" in
+    start)
+        echo "\${QPKG_NAME} is a standalone tool, not a service."
+        echo "Binary location: \${QPKG_ROOT}/${BIN_FILENAME}"
+        ;;
+    stop)
+        echo "\${QPKG_NAME} is a standalone tool, nothing to stop."
+        ;;
+    restart)
+        echo "\${QPKG_NAME} is a standalone tool, nothing to restart."
+        ;;
+    *)
+        echo "Usage: \$0 {start|stop|restart}"
+        echo "\${QPKG_NAME} is a standalone tool. Run directly:"
+        echo "  \${QPKG_ROOT}/${BIN_FILENAME}"
+        ;;
+esac
+exit 0
+SVCEOF
+}
+
+generate_daemon_script() {
+    local out="$1"
     local needs_user_switch="false"
     [ "$RUN_AS_USER" != "root" ] && needs_user_switch="true"
 
@@ -580,7 +643,6 @@ SVCEOF
     sed -i "s|__SVC_PORT__|${SVC_PORT}|g" "$out"
     sed -i "s|__SVC_ARGS__|${SVC_ARGS}|g" "$out"
     sed -i "s|__RUN_AS_USER__|${RUN_AS_USER}|g" "$out"
-    chmod +x "$out"
 }
 
 generate_package_routines() {
@@ -589,8 +651,6 @@ generate_package_routines() {
     cat > "$out" << EOF
 #!/bin/bash
 # Package routines for ${PKG_NAME} QPKG
-
-SVC_USER="${RUN_AS_USER}"
 
 pkg_pre_install() {
     return 0
@@ -607,29 +667,37 @@ pkg_post_install() {
     # Make binary executable
     chmod +x "\${QPKG_ROOT}/${BIN_FILENAME}"
 
+    # Make service script executable
+    chmod +x "\${QPKG_ROOT}/${PKG_NAME}.sh"
+
+EOF
+
+    if [ "$APP_TYPE" = "service" ]; then
+        cat >> "$out" << EOF
     # Create data directories
     mkdir -p "\${QPKG_ROOT}/data"
     mkdir -p "\${QPKG_ROOT}/log"
 
 EOF
-
-    if [ "$RUN_AS_USER" != "root" ]; then
-        cat >> "$out" << EOF
+        if [ "$RUN_AS_USER" != "root" ]; then
+            cat >> "$out" << EOF
     # Set ownership for non-root user
-    chown -R \${SVC_USER}:everyone "\${QPKG_ROOT}/data"
-    chown -R \${SVC_USER}:everyone "\${QPKG_ROOT}/log"
+    chown -R ${RUN_AS_USER}:everyone "\${QPKG_ROOT}/data"
+    chown -R ${RUN_AS_USER}:everyone "\${QPKG_ROOT}/log"
 
 EOF
+        fi
     fi
 
     cat >> "$out" << EOF
-    # Make service script executable
-    chmod +x "\${QPKG_ROOT}/${PKG_NAME}.sh"
-
     return 0
 }
 
 pkg_pre_remove() {
+EOF
+
+    if [ "$APP_TYPE" = "service" ]; then
+        cat >> "$out" << EOF
     local QPKG_ROOT
     QPKG_ROOT=\$(/sbin/getcfg ${PKG_NAME} Install_Path -f /etc/config/qpkg.conf)
     if [ -f "\${QPKG_ROOT}/${BIN_FILENAME}.pid" ]; then
@@ -638,6 +706,10 @@ pkg_pre_remove() {
         [ -n "\$pid" ] && kill "\$pid" 2>/dev/null
         sleep 2
     fi
+EOF
+    fi
+
+    cat >> "$out" << EOF
     return 0
 }
 
@@ -721,6 +793,7 @@ save_config() {
     local out="$1/qpkg-builder.conf"
     cat > "$out" << EOF
 # QPKG Builder saved config - can be loaded to regenerate
+APP_TYPE="${APP_TYPE}"
 PKG_NAME="${PKG_NAME}"
 PKG_DISPLAY="${PKG_DISPLAY}"
 PKG_VERSION="${PKG_VERSION}"
@@ -788,6 +861,9 @@ do_generate() {
     fi
 
     # Show result
+    local script_type="Service script"
+    [ "$APP_TYPE" = "standalone" ] && script_type="Stub script (no-op)"
+
     $DIALOG --title "Done!" --msgbox "\
 QPKG project created at:
 ${project_dir}/
@@ -795,7 +871,7 @@ ${project_dir}/
 Contents:
   qpkg.cfg              Package config
   package_routines       Install/remove hooks
-  shared/${PKG_NAME}.sh  Service script
+  shared/${PKG_NAME}.sh  ${script_type}
   x86_64/${BIN_FILENAME} Binary
   icons/                 Package icons
   build-qpkg.sh          Build helper
@@ -829,10 +905,20 @@ main() {
     screen_welcome || exit 0
     screen_package_info || exit 0
     screen_author || exit 0
+    screen_app_type || exit 0
     screen_binary_source || exit 0
-    screen_service_config || exit 0
-    screen_run_as || exit 0
-    screen_webui || exit 0
+    if [ "$APP_TYPE" = "service" ]; then
+        screen_service_config || exit 0
+        screen_run_as || exit 0
+        screen_webui || exit 0
+    else
+        # Defaults for standalone - no service
+        SVC_PORT=""
+        SVC_ARGS=""
+        RUN_AS_USER="root"
+        HAS_WEBUI="no"
+        WEBUI_PATH=""
+    fi
     screen_icon || exit 0
     screen_output_dir || exit 0
     screen_summary || exit 0
