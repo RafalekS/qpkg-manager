@@ -14,10 +14,11 @@
 
 set -e
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.1.0"
 DIALOG=${DIALOG:-dialog}
 TMPFILE=$(mktemp /tmp/qpkg-builder.XXXXXX)
-trap "rm -f $TMPFILE" EXIT
+DEB_TMPDIR=""
+trap 'rm -f "$TMPFILE"; [ -n "$DEB_TMPDIR" ] && rm -rf "$DEB_TMPDIR"' EXIT
 
 # --- Defaults ----------------------------------------------------------------
 DEF_AUTHOR="Anon"
@@ -49,6 +50,80 @@ ask() {
 # Show error in dialog
 show_error() {
     $DIALOG --title "Error" --msgbox "$1" 8 50
+}
+
+# --- Deb Extraction ----------------------------------------------------------
+
+# Extract a .deb file into a temp directory.
+# Sets DEB_TMPDIR to the extraction path.
+# Creates: DEB_TMPDIR/data/ (filesystem) and DEB_TMPDIR/control/ (metadata)
+extract_deb() {
+    local deb_path="$1"
+    DEB_TMPDIR=$(mktemp -d /tmp/qpkg-deb.XXXXXX)
+
+    mkdir -p "$DEB_TMPDIR/data" "$DEB_TMPDIR/control"
+
+    if command -v dpkg-deb >/dev/null 2>&1; then
+        dpkg-deb -x "$deb_path" "$DEB_TMPDIR/data" 2>/dev/null || return 1
+        dpkg-deb -e "$deb_path" "$DEB_TMPDIR/control" 2>/dev/null || return 1
+    elif command -v ar >/dev/null 2>&1; then
+        local saved_dir
+        saved_dir=$(pwd)
+        cd "$DEB_TMPDIR"
+        ar x "$deb_path" 2>/dev/null || { cd "$saved_dir"; return 1; }
+        # data.tar.* could be .gz, .xz, .zst
+        local data_tar
+        data_tar=$(ls data.tar.* 2>/dev/null | head -1)
+        if [ -n "$data_tar" ]; then
+            tar xf "$data_tar" -C data 2>/dev/null || { cd "$saved_dir"; return 1; }
+        fi
+        local ctrl_tar
+        ctrl_tar=$(ls control.tar.* 2>/dev/null | head -1)
+        if [ -n "$ctrl_tar" ]; then
+            tar xf "$ctrl_tar" -C control 2>/dev/null || { cd "$saved_dir"; return 1; }
+        fi
+        cd "$saved_dir"
+    else
+        return 1
+    fi
+    return 0
+}
+
+# Parse the control file from a .deb extraction
+# Sets: DEB_PKG_NAME, DEB_VERSION, DEB_SUMMARY, DEB_MAINTAINER, DEB_ARCH
+parse_deb_control() {
+    local ctrl="$DEB_TMPDIR/control/control"
+    [ ! -f "$ctrl" ] && return 1
+
+    DEB_PKG_NAME=$(sed -n 's/^Package: *//p' "$ctrl" | head -1)
+    DEB_VERSION=$(sed -n 's/^Version: *//p' "$ctrl" | head -1)
+    DEB_SUMMARY=$(sed -n 's/^Description: *//p' "$ctrl" | head -1)
+    DEB_MAINTAINER=$(sed -n 's/^Maintainer: *//p' "$ctrl" | head -1)
+    DEB_ARCH=$(sed -n 's/^Architecture: *//p' "$ctrl" | head -1)
+    return 0
+}
+
+# Find executables in extracted .deb data.
+# Prints paths relative to DEB_TMPDIR/data, one per line.
+find_deb_executables() {
+    local data_dir="$DEB_TMPDIR/data"
+    # Look in common binary directories first, then anywhere
+    local found=""
+    for d in usr/bin usr/sbin usr/local/bin usr/local/sbin bin sbin opt; do
+        if [ -d "$data_dir/$d" ]; then
+            local files
+            files=$(find "$data_dir/$d" -maxdepth 2 -type f -executable 2>/dev/null)
+            if [ -n "$files" ]; then
+                found="${found}${files}
+"
+            fi
+        fi
+    done
+
+    # Deduplicate and strip the data_dir prefix
+    if [ -n "$found" ]; then
+        echo "$found" | sed "s|^${data_dir}/||" | sort -u | grep -v '^$'
+    fi
 }
 
 # --- Icon Generation ---------------------------------------------------------
@@ -154,8 +229,9 @@ screen_welcome() {
         --msgbox "\
 Welcome to the QPKG Package Builder!
 
-This wizard will create a complete QPKG project
-structure for your binary application.
+This wizard creates a QPKG project from:
+ - A standalone binary (executable file)
+ - A .deb package (auto-extracts binaries)
 
 Supports two modes:
  - Service: daemon with start/stop, port, boot
@@ -166,7 +242,7 @@ QNAP quirks are handled automatically:
  - No nohup (uses bash &)
  - Proper privilege dropping
 
-Press OK to begin." 21 54
+Press OK to begin." 22 56
 }
 
 screen_app_type() {
@@ -239,17 +315,18 @@ screen_author() {
 
 screen_binary_source() {
     ask --title "Binary Source" \
-        --menu "Where is the binary?" 12 55 3 \
-        "local"    "Local file path" \
-        "url"      "Download from URL" \
+        --menu "Where is the binary?" 14 60 4 \
+        "local"    "Local file path (binary or .deb)" \
+        "url"      "Download from URL (binary or .deb)" \
+        "deb"      "Extract from a .deb package" \
         "later"    "I will copy it manually later"
     [ $? -ne 0 ] && return 1
     BIN_SOURCE=$(cat "$TMPFILE")
 
     case "$BIN_SOURCE" in
         local)
-            ask --title "Binary Path" \
-                --inputbox "Full path to the binary file:" 10 60 \
+            ask --title "Binary/Package Path" \
+                --inputbox "Full path to the binary or .deb file:" 10 60 \
                 "${BIN_PATH:-}"
             [ $? -ne 0 ] && return 1
             BIN_PATH=$(cat "$TMPFILE")
@@ -258,20 +335,71 @@ screen_binary_source() {
                 screen_binary_source
                 return $?
             fi
-            BIN_FILENAME=$(basename "$BIN_PATH")
+            # Auto-detect .deb
+            case "$BIN_PATH" in
+                *.deb)
+                    BIN_SOURCE="deb"
+                    DEB_PATH="$BIN_PATH"
+                    handle_deb_source || return 1
+                    ;;
+                *)
+                    BIN_FILENAME=$(basename "$BIN_PATH")
+                    ;;
+            esac
             ;;
         url)
             ask --title "Binary URL" \
-                --inputbox "Download URL for the binary:" 10 70 \
+                --inputbox "Download URL for the binary or .deb:" 10 70 \
                 "${BIN_URL:-}"
             [ $? -ne 0 ] && return 1
             BIN_URL=$(cat "$TMPFILE")
 
-            ask --title "Binary Filename" \
-                --inputbox "Save as filename (e.g. myapp):" 10 50 \
-                "${BIN_FILENAME:-$(basename "$BIN_URL" | sed 's/?.*//')}"
+            # Auto-detect .deb URL
+            local url_basename
+            url_basename=$(basename "$BIN_URL" | sed 's/?.*//')
+            case "$url_basename" in
+                *.deb)
+                    BIN_SOURCE="deb"
+                    # Download the .deb first
+                    DEB_TMPDIR=$(mktemp -d /tmp/qpkg-deb.XXXXXX)
+                    DEB_PATH="${DEB_TMPDIR}/$(echo "$url_basename" | tr '[:upper:]' '[:lower:]')"
+                    $DIALOG --title "Downloading" \
+                        --infobox "Downloading .deb package...\n\n$BIN_URL" 8 65
+                    if command -v wget >/dev/null 2>&1; then
+                        wget -q -O "$DEB_PATH" "$BIN_URL" 2>/dev/null
+                    elif command -v curl >/dev/null 2>&1; then
+                        curl -sL -o "$DEB_PATH" "$BIN_URL" 2>/dev/null
+                    else
+                        show_error "Neither wget nor curl available to download."
+                        return 1
+                    fi
+                    if [ ! -f "$DEB_PATH" ] || [ ! -s "$DEB_PATH" ]; then
+                        show_error "Download failed: $BIN_URL"
+                        return 1
+                    fi
+                    handle_deb_source || return 1
+                    ;;
+                *)
+                    ask --title "Binary Filename" \
+                        --inputbox "Save as filename (e.g. myapp):" 10 50 \
+                        "${BIN_FILENAME:-$url_basename}"
+                    [ $? -ne 0 ] && return 1
+                    BIN_FILENAME=$(cat "$TMPFILE")
+                    ;;
+            esac
+            ;;
+        deb)
+            ask --title "Deb Package Path" \
+                --inputbox "Full path to the .deb file:" 10 60 \
+                "${DEB_PATH:-}"
             [ $? -ne 0 ] && return 1
-            BIN_FILENAME=$(cat "$TMPFILE")
+            DEB_PATH=$(cat "$TMPFILE")
+            if [ ! -f "$DEB_PATH" ]; then
+                show_error "File not found: $DEB_PATH"
+                screen_binary_source
+                return $?
+            fi
+            handle_deb_source || return 1
             ;;
         later)
             ask --title "Binary Filename" \
@@ -284,6 +412,113 @@ screen_binary_source() {
 
     # Make sure filename is lowercase for consistency
     BIN_FILENAME=$(echo "$BIN_FILENAME" | tr '[:upper:]' '[:lower:]')
+}
+
+# Handle .deb extraction, binary selection, and metadata auto-fill.
+# Expects DEB_PATH to be set. Sets BIN_PATH and BIN_FILENAME.
+handle_deb_source() {
+    # Check extraction tools
+    if ! command -v dpkg-deb >/dev/null 2>&1 && ! command -v ar >/dev/null 2>&1; then
+        show_error "Cannot extract .deb: need dpkg-deb or ar.\n\nInstall binutils (for ar) or dpkg."
+        return 1
+    fi
+
+    $DIALOG --title "Extracting" \
+        --infobox "Extracting .deb package..." 5 40
+
+    if ! extract_deb "$DEB_PATH"; then
+        show_error "Failed to extract .deb file."
+        return 1
+    fi
+
+    # Parse control file for metadata
+    if parse_deb_control; then
+        # Auto-fill package info if not already set by user
+        if [ -z "$PKG_NAME" ] || [ "$PKG_NAME" = "MyApp" ]; then
+            # Sanitise deb package name for QPKG (replace dots with dashes)
+            PKG_NAME=$(echo "$DEB_PKG_NAME" | sed 's/[^a-zA-Z0-9_-]/-/g')
+        fi
+        if [ -z "$PKG_DISPLAY" ] || [ "$PKG_DISPLAY" = "$PKG_NAME" ]; then
+            PKG_DISPLAY="$DEB_PKG_NAME"
+        fi
+        [ -z "$PKG_VERSION" ] || [ "$PKG_VERSION" = "1.0.0" ] && PKG_VERSION="$DEB_VERSION"
+        [ -z "$PKG_SUMMARY" ] && PKG_SUMMARY="$DEB_SUMMARY"
+        if [ -n "$DEB_MAINTAINER" ]; then
+            # Strip email from maintainer for author field
+            PKG_AUTHOR=$(echo "$DEB_MAINTAINER" | sed 's/ *<[^>]*>//')
+        fi
+
+        # Show what we found
+        local arch_note=""
+        if [ -n "$DEB_ARCH" ] && [ "$DEB_ARCH" != "amd64" ] && [ "$DEB_ARCH" != "all" ]; then
+            arch_note="\n\nWARNING: This .deb is for '${DEB_ARCH}'.\nQNAP TS-464 needs amd64 binaries!"
+        fi
+        $DIALOG --title "Deb Package Info" \
+            --msgbox "\
+Extracted from .deb control file:
+
+Package:     ${DEB_PKG_NAME}
+Version:     ${DEB_VERSION}
+Description: ${DEB_SUMMARY}
+Maintainer:  ${DEB_MAINTAINER}
+Arch:        ${DEB_ARCH}${arch_note}
+
+These values will be used as defaults." 16 60
+    fi
+
+    # Find executables
+    local exe_list
+    exe_list=$(find_deb_executables)
+
+    if [ -z "$exe_list" ]; then
+        show_error "No executables found in .deb package.\n\nThe package may contain only libraries or data files."
+        return 1
+    fi
+
+    local exe_count
+    exe_count=$(echo "$exe_list" | wc -l)
+
+    if [ "$exe_count" -eq 1 ]; then
+        # Only one executable - use it directly
+        local exe_path="$exe_list"
+        BIN_FILENAME=$(basename "$exe_path")
+        BIN_PATH="${DEB_TMPDIR}/data/${exe_path}"
+
+        $DIALOG --title "Binary Found" \
+            --msgbox "Found executable:\n\n${exe_path}\n\nThis will be packaged as: ${BIN_FILENAME}" 12 60
+    else
+        # Multiple executables - let user pick
+        local menu_args=""
+        local i=1
+        local IFS_SAVE="$IFS"
+        IFS=$'\n'
+        for exe in $exe_list; do
+            local fname
+            fname=$(basename "$exe")
+            menu_args="$menu_args \"$exe\" \"$fname\""
+            i=$((i + 1))
+        done
+        IFS="$IFS_SAVE"
+
+        # Build the dialog command with eval since menu_args has quotes
+        eval "ask --title \"Select Binary\" \
+            --menu \"Multiple executables found. Which one is the main binary?\" 20 70 $((exe_count > 10 ? 10 : exe_count)) \
+            $menu_args"
+        [ $? -ne 0 ] && return 1
+        local selected
+        selected=$(cat "$TMPFILE")
+
+        BIN_FILENAME=$(basename "$selected")
+        BIN_PATH="${DEB_TMPDIR}/data/${selected}"
+    fi
+
+    # Verify the selected binary exists
+    if [ ! -f "$BIN_PATH" ]; then
+        show_error "Selected binary not found at:\n$BIN_PATH"
+        return 1
+    fi
+
+    return 0
 }
 
 screen_service_config() {
@@ -382,6 +617,7 @@ screen_summary() {
     case "$BIN_SOURCE" in
         local) bin_info="$BIN_PATH" ;;
         url)   bin_info="Download: $BIN_URL" ;;
+        deb)   bin_info="From .deb: $(basename "${DEB_PATH:-unknown}")" ;;
         later) bin_info="(manual copy later)" ;;
     esac
 
@@ -804,6 +1040,7 @@ BIN_SOURCE="${BIN_SOURCE}"
 BIN_PATH="${BIN_PATH}"
 BIN_URL="${BIN_URL}"
 BIN_FILENAME="${BIN_FILENAME}"
+DEB_PATH="${DEB_PATH}"
 SVC_PORT="${SVC_PORT}"
 SVC_ARGS="${SVC_ARGS}"
 RUN_AS_USER="${RUN_AS_USER}"
@@ -833,7 +1070,7 @@ do_generate() {
 
     # Handle binary
     case "$BIN_SOURCE" in
-        local)
+        local|deb)
             cp "$BIN_PATH" "${project_dir}/x86_64/${BIN_FILENAME}"
             chmod +x "${project_dir}/x86_64/${BIN_FILENAME}"
             ;;
@@ -903,10 +1140,11 @@ main() {
 
     # Run wizard
     screen_welcome || exit 0
-    screen_package_info || exit 0
-    screen_author || exit 0
     screen_app_type || exit 0
     screen_binary_source || exit 0
+    # After .deb extraction, fields may be auto-filled - let user confirm/edit
+    screen_package_info || exit 0
+    screen_author || exit 0
     if [ "$APP_TYPE" = "service" ]; then
         screen_service_config || exit 0
         screen_run_as || exit 0
