@@ -1207,6 +1207,9 @@ HDREOF
 
 QBUILD=""
 for path in $(which qbuild 2>/dev/null) \
+    /usr/share/QDK/bin/qbuild \
+    /usr/local/share/QDK/bin/qbuild \
+    "$HOME/QDK/bin/qbuild" \
     /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
     /opt/QDK/bin/qbuild; do
     [ -x "$path" ] && QBUILD="$path" && break
@@ -1394,9 +1397,11 @@ To build later:
                 install_qdk || true
                 # Re-check for qbuild after install
                 for p in $(which qbuild 2>/dev/null) \
+                    /usr/share/QDK/bin/qbuild \
+                    /usr/local/share/QDK/bin/qbuild \
+                    "$HOME/QDK/bin/qbuild" \
                     /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
-                    /opt/QDK/bin/qbuild \
-                    "$HOME/QDK/bin/qbuild"; do
+                    /opt/QDK/bin/qbuild; do
                     [ -x "$p" ] && qbuild_path="$p" && break
                 done
                 if [ -z "$qbuild_path" ]; then
