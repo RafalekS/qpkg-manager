@@ -984,7 +984,8 @@ generate_build_script() {
 
     cat > "$out" << 'BLDEOF'
 #!/bin/bash
-# Build QPKG package - run on QNAP NAS with QDK installed
+# Build QPKG package
+# Works with qbuild (QDK) or standalone (any Linux with tar/gzip)
 set -e
 
 GREEN='\033[0;32m'
@@ -994,19 +995,6 @@ NC='\033[0m'
 ok()  { echo -e "${GREEN}[  OK ]${NC} $1"; }
 err() { echo -e "${RED}[ERROR]${NC} $1"; }
 msg() { echo -e "${YELLOW}[BUILD]${NC} $1"; }
-
-# Find qbuild
-QBUILD=$(which qbuild 2>/dev/null)
-if [ -z "$QBUILD" ]; then
-    for path in /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild /opt/QDK/bin/qbuild; do
-        [ -x "$path" ] && QBUILD="$path" && break
-    done
-fi
-if [ -z "$QBUILD" ] || [ ! -x "$QBUILD" ]; then
-    err "qbuild not found. Install QDK from App Center."
-    exit 1
-fi
-ok "Found qbuild: ${QBUILD}"
 
 cd "$(dirname "$0")"
 
@@ -1021,26 +1009,237 @@ chmod +x "x86_64/__BIN_FILENAME__"
 chmod +x "shared/__PKG_NAME__.sh"
 chmod +x "package_routines"
 
-msg "Building QPKG..."
-echo ""
-$QBUILD
-echo ""
+# Read qpkg.cfg values
+source_cfg() {
+    local key="$1" file="qpkg.cfg"
+    sed -n "s/^${key}=\"\(.*\)\"/\1/p" "$file" | head -1
+}
 
-if [ -d "build" ] && ls build/*.qpkg >/dev/null 2>&1; then
-    ok "Build complete!"
-    ls -lh build/*.qpkg
-    echo ""
-    msg "Install via:"
-    echo "  App Center > Install Manually > select .qpkg file"
-    echo "  or: sh build/__PKG_NAME___*.qpkg"
+PKG_NAME=$(source_cfg QPKG_NAME)
+PKG_DISPLAY=$(source_cfg QPKG_DISPLAY_NAME)
+PKG_VER=$(source_cfg QPKG_VER)
+
+# --- Standalone builder (no QDK needed) -----------------------------------
+
+build_standalone() {
+    msg "Building QPKG (standalone mode - no QDK)..."
+    local WORK=$(mktemp -d)
+    trap "rm -rf '$WORK'" EXIT
+
+    # 1. Collect data files (what gets installed to QPKG_ROOT)
+    local DATA_DIR="$WORK/data"
+    mkdir -p "$DATA_DIR"
+    # Copy binary
+    cp "x86_64/__BIN_FILENAME__" "$DATA_DIR/"
+    chmod +x "$DATA_DIR/__BIN_FILENAME__"
+    # Copy service script
+    cp "shared/__PKG_NAME__.sh" "$DATA_DIR/"
+    chmod +x "$DATA_DIR/__PKG_NAME__.sh"
+    # Copy icons if present
+    if [ -d "icons" ] && ls icons/* >/dev/null 2>&1; then
+        mkdir -p "$DATA_DIR/.qpkg_icon"
+        cp icons/* "$DATA_DIR/.qpkg_icon/" 2>/dev/null || true
+    fi
+    ok "Data files collected"
+
+    # 2. Create data.tar.gz
+    (cd "$DATA_DIR" && tar czf "$WORK/data.tar.gz" .)
+    ok "data.tar.gz created ($(du -h "$WORK/data.tar.gz" | cut -f1))"
+
+    # 3. Create qinstall.sh (runs during .qpkg installation on NAS)
+    cat > "$WORK/qinstall.sh" << 'QINSTEOF'
+#!/bin/sh
+# QPKG installer script - called during .qpkg installation
+CONF="/etc/config/qpkg.conf"
+QPKG_NAME="__PKG_NAME__"
+
+# Find install path
+PUBLIC_SHARE=$(/sbin/getcfg Public path -f /etc/config/smb.conf 2>/dev/null)
+if [ -z "$PUBLIC_SHARE" ]; then
+    PUBLIC_SHARE="/share/CACHEDEV1_DATA"
+fi
+QPKG_DIR="${PUBLIC_SHARE}/.qpkg/${QPKG_NAME}"
+
+# Extract data
+mkdir -p "$QPKG_DIR"
+SCRIPT_LEN=$(sed -n '2p' /dev/stdin 2>/dev/null || echo 0)
+
+# Source package_routines if present
+[ -f package_routines ] && . ./package_routines
+
+# Run pre-install
+type pkg_pre_install >/dev/null 2>&1 && pkg_pre_install
+
+# Copy files from extraction dir to install dir
+if [ -d "data" ]; then
+    cp -af data/* "$QPKG_DIR/" 2>/dev/null
+fi
+
+# Register in qpkg.conf
+/sbin/setcfg "$QPKG_NAME" Name "$QPKG_NAME" -f "$CONF"
+/sbin/setcfg "$QPKG_NAME" Install_Path "$QPKG_DIR" -f "$CONF"
+/sbin/setcfg "$QPKG_NAME" Enable "TRUE" -f "$CONF"
+
+# Read and apply settings from qpkg.cfg
+if [ -f qpkg.cfg ]; then
+    display=$(/bin/grep "^QPKG_DISPLAY_NAME=" qpkg.cfg | cut -d'"' -f2)
+    version=$(/bin/grep "^QPKG_VER=" qpkg.cfg | cut -d'"' -f2)
+    svc_prog=$(/bin/grep "^QPKG_SERVICE_PROGRAM=" qpkg.cfg | cut -d'"' -f2)
+    svc_port=$(/bin/grep "^QPKG_SERVICE_PORT=" qpkg.cfg | cut -d'"' -f2)
+    rc_num=$(/bin/grep "^QPKG_RC_NUM=" qpkg.cfg | cut -d'"' -f2)
+    webui=$(/bin/grep "^QPKG_WEBUI=" qpkg.cfg | cut -d'"' -f2)
+    web_port=$(/bin/grep "^QPKG_WEB_PORT=" qpkg.cfg | cut -d'"' -f2)
+
+    [ -n "$display" ] && /sbin/setcfg "$QPKG_NAME" Display_Name "$display" -f "$CONF"
+    [ -n "$version" ] && /sbin/setcfg "$QPKG_NAME" Version "$version" -f "$CONF"
+    [ -n "$svc_prog" ] && /sbin/setcfg "$QPKG_NAME" Shell "$QPKG_DIR/$svc_prog" -f "$CONF"
+    [ -n "$svc_port" ] && /sbin/setcfg "$QPKG_NAME" Service_Port "$svc_port" -f "$CONF"
+    [ -n "$rc_num" ] && /sbin/setcfg "$QPKG_NAME" RC_Number "$rc_num" -f "$CONF"
+    [ -n "$webui" ] && /sbin/setcfg "$QPKG_NAME" Web_URL "$webui" -f "$CONF"
+    [ -n "$web_port" ] && /sbin/setcfg "$QPKG_NAME" Web_Port "$web_port" -f "$CONF"
+fi
+
+# Handle icons
+if [ -d "$QPKG_DIR/.qpkg_icon" ]; then
+    ICON_DIR="/home/httpd/RSS/pkg_icons"
+    mkdir -p "$ICON_DIR"
+    cp "$QPKG_DIR/.qpkg_icon"/* "$ICON_DIR/" 2>/dev/null
+fi
+
+# Run post-install
+type pkg_post_install >/dev/null 2>&1 && pkg_post_install
+
+echo "${QPKG_NAME} installed to ${QPKG_DIR}"
+QINSTEOF
+    sed -i "s|__PKG_NAME__|${PKG_NAME}|g" "$WORK/qinstall.sh"
+    chmod +x "$WORK/qinstall.sh"
+
+    # 4. Create control.tar.gz (contains qpkg.cfg, package_routines, qinstall.sh)
+    cp qpkg.cfg "$WORK/qpkg.cfg"
+    cp package_routines "$WORK/package_routines"
+    (cd "$WORK" && tar czf "$WORK/control.tar.gz" qpkg.cfg package_routines qinstall.sh)
+    ok "control.tar.gz created"
+
+    # 5. Create control archive block (tar of control.tar.gz, padded to 20480 bytes)
+    (cd "$WORK" && tar cf "$WORK/control_block.tar" control.tar.gz)
+    local block_size=$(stat -c%s "$WORK/control_block.tar" 2>/dev/null || stat -f%z "$WORK/control_block.tar")
+    if [ "$block_size" -lt 20480 ]; then
+        dd if=/dev/zero bs=1 count=$((20480 - block_size)) >> "$WORK/control_block.tar" 2>/dev/null
+    fi
+    ok "Control block created (20480 bytes)"
+
+    # 6. Create the shell script header
+    cat > "$WORK/header.sh" << 'HDREOF'
+#!/bin/sh
+# QPKG package installer
+# Generated by qpkg-builder (standalone mode)
+set -e
+
+echo "Installing __PKG_DISPLAY__ v__PKG_VER__..."
+
+EXTRACT_DIR=$(mktemp -d /tmp/qpkg-install.XXXXXX)
+trap "rm -rf '$EXTRACT_DIR'" EXIT
+
+script_len=__SCRIPT_LEN__
+
+# Extract control archive (20480 bytes after script header)
+dd if="${0}" bs=$script_len skip=1 2>/dev/null | \
+    tar xf - -C "$EXTRACT_DIR" 2>/dev/null
+
+# Extract control.tar.gz within the control block
+if [ -f "$EXTRACT_DIR/control.tar.gz" ]; then
+    (cd "$EXTRACT_DIR" && tar xzf control.tar.gz 2>/dev/null)
+fi
+
+# Extract data archive (after script header + 20480 byte control block)
+offset=$(expr $script_len + 20480)
+mkdir -p "$EXTRACT_DIR/data"
+dd if="${0}" bs=1 skip=$offset 2>/dev/null | \
+    head -c __DATA_LEN__ | \
+    tar xzf - -C "$EXTRACT_DIR/data" 2>/dev/null
+
+# Run the installer
+cd "$EXTRACT_DIR"
+if [ -f qinstall.sh ]; then
+    /bin/sh qinstall.sh
 else
-    err "Build failed - check output above"
+    echo "ERROR: qinstall.sh not found in package"
     exit 1
 fi
+
+echo "Done."
+exit 0
+HDREOF
+    sed -i "s|__PKG_DISPLAY__|${PKG_DISPLAY}|g" "$WORK/header.sh"
+    sed -i "s|__PKG_VER__|${PKG_VER}|g" "$WORK/header.sh"
+
+    # Calculate script_len (we need to know the size after substitution)
+    # Use a placeholder length, measure, then recalculate
+    sed -i "s|__SCRIPT_LEN__|99999|" "$WORK/header.sh"
+    local data_len=$(stat -c%s "$WORK/data.tar.gz" 2>/dev/null || stat -f%z "$WORK/data.tar.gz")
+    sed -i "s|__DATA_LEN__|${data_len}|" "$WORK/header.sh"
+    local hdr_len=$(stat -c%s "$WORK/header.sh" 2>/dev/null || stat -f%z "$WORK/header.sh")
+    # script_len is the same digit count as 99999 (5 digits), so size stays stable
+    sed -i "s|99999|$(printf '%05d' $hdr_len)|" "$WORK/header.sh"
+    # Verify size didn't change
+    local hdr_len2=$(stat -c%s "$WORK/header.sh" 2>/dev/null || stat -f%z "$WORK/header.sh")
+    if [ "$hdr_len" -ne "$hdr_len2" ]; then
+        # Size changed - recalculate
+        sed -i "s|$(printf '%05d' $hdr_len)|$(printf '%05d' $hdr_len2)|" "$WORK/header.sh"
+    fi
+
+    # 7. Create 100-byte footer
+    printf "%-10s%-40s%-10s%-20s%-10s%-10s" \
+        "" "" "$(date +%s | cut -c1-10)" \
+        "$PKG_DISPLAY" "$PKG_VER" "QNAPQPKG" \
+        > "$WORK/footer.bin"
+
+    # 8. Assemble the .qpkg file
+    mkdir -p build
+    local outfile="build/${PKG_NAME}_${PKG_VER}_x86_64.qpkg"
+    cat "$WORK/header.sh" "$WORK/control_block.tar" "$WORK/data.tar.gz" "$WORK/footer.bin" > "$outfile"
+    chmod +x "$outfile"
+    ok "QPKG assembled: $outfile"
+    ls -lh "$outfile"
+}
+
+# --- Try qbuild first, fall back to standalone ----------------------------
+
+QBUILD=""
+for path in $(which qbuild 2>/dev/null) \
+    /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
+    /opt/QDK/bin/qbuild; do
+    [ -x "$path" ] && QBUILD="$path" && break
+done
+
+if [ -n "$QBUILD" ]; then
+    ok "Found qbuild: ${QBUILD}"
+    msg "Building QPKG with QDK..."
+    echo ""
+    $QBUILD
+    echo ""
+    if [ -d "build" ] && ls build/*.qpkg >/dev/null 2>&1; then
+        ok "Build complete!"
+        ls -lh build/*.qpkg
+    else
+        err "qbuild failed - check output above"
+        exit 1
+    fi
+else
+    msg "qbuild not found - using standalone builder"
+    build_standalone
+fi
+
+echo ""
+msg "Install via:"
+echo "  App Center > Install Manually > select .qpkg file"
+echo "  or on NAS:  sh build/__PKG_NAME___*.qpkg"
 BLDEOF
 
     sed -i "s|__BIN_FILENAME__|${BIN_FILENAME}|g" "$out"
     sed -i "s|__PKG_NAME__|${PKG_NAME}|g" "$out"
+    sed -i "s|__PKG_DISPLAY__|${PKG_DISPLAY}|g" "$out"
+    sed -i "s|__PKG_VER__|${PKG_VERSION}|g" "$out"
     chmod +x "$out"
 }
 
