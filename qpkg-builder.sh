@@ -107,23 +107,42 @@ parse_deb_control() {
 # Prints paths relative to DEB_TMPDIR/data, one per line.
 find_deb_executables() {
     local data_dir="$DEB_TMPDIR/data"
-    # Look in common binary directories first, then anywhere
-    local found=""
-    for d in usr/bin usr/sbin usr/local/bin usr/local/sbin bin sbin opt; do
-        if [ -d "$data_dir/$d" ]; then
-            local files
-            files=$(find "$data_dir/$d" -maxdepth 2 -type f -executable 2>/dev/null)
-            if [ -n "$files" ]; then
-                found="${found}${files}
-"
-            fi
-        fi
-    done
+    # Find all regular files with execute permission bit set (using -perm,
+    # not -executable, because -executable checks if current user can run
+    # it which fails for cross-arch binaries e.g. arm64 host, amd64 binary)
+    local all_exe
+    all_exe=$(find "$data_dir" -type f -perm /111 2>/dev/null)
 
-    # Deduplicate and strip the data_dir prefix
-    if [ -n "$found" ]; then
-        echo "$found" | sed "s|^${data_dir}/||" | sort -u | grep -v '^$'
+    if [ -z "$all_exe" ]; then
+        return
     fi
+
+    # Filter out common non-binary files (shared libs, man pages, etc.)
+    # Keep: anything in bin/sbin/opt dirs, or ELF files, or scripts
+    local filtered=""
+    local IFS_SAVE="$IFS"
+    IFS=$'\n'
+    for f in $all_exe; do
+        local rel
+        rel=$(echo "$f" | sed "s|^${data_dir}/||")
+        case "$rel" in
+            # Skip shared libraries, man pages, doc files, completions
+            *.so|*.so.*) continue ;;
+            usr/share/*) continue ;;
+            usr/lib/*)
+                # But keep things under lib/*/bin/ (like Java runtime)
+                case "$rel" in
+                    */bin/*) ;;
+                    *) continue ;;
+                esac
+                ;;
+        esac
+        filtered="${filtered}${rel}
+"
+    done
+    IFS="$IFS_SAVE"
+
+    echo "$filtered" | sort -u | grep -v '^$'
 }
 
 # --- Icon Generation ---------------------------------------------------------
