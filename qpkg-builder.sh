@@ -1315,11 +1315,11 @@ do_generate() {
         fi
     fi
 
-    # Show result
+    # Show what was created
     local script_type="Service script"
     [ "$APP_TYPE" = "standalone" ] && script_type="Stub script (no-op)"
 
-    $DIALOG --title "Done!" --msgbox "\
+    $DIALOG --title "Project Created" --msgbox "\
 QPKG project created at:
 ${project_dir}/
 
@@ -1330,14 +1330,188 @@ Contents:
   x86_64/${BIN_FILENAME} Binary
   icons/                 Package icons
   build-qpkg.sh          Build helper
-  qpkg-builder.conf      Saved config
+  qpkg-builder.conf      Saved config" 16 60
 
-To build on QNAP:
+    # Offer to build the .qpkg now
+    screen_build "$project_dir"
+}
+
+screen_build() {
+    local project_dir="$1"
+
+    # Detect qbuild (QDK)
+    local qbuild_path=""
+    for p in $(which qbuild 2>/dev/null) \
+        /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
+        /opt/QDK/bin/qbuild; do
+        [ -x "$p" ] && qbuild_path="$p" && break
+    done
+
+    # Can't build if source was "later" (no binary yet)
+    if [ "$BIN_SOURCE" = "later" ]; then
+        $DIALOG --title "Build" --msgbox "\
+Cannot build yet - no binary provided.
+
+Copy your binary to:
+  ${project_dir}/x86_64/${BIN_FILENAME}
+
+Then build with:
   cd ${project_dir}
-  sudo bash build-qpkg.sh
+  bash build-qpkg.sh" 12 60
+        return 0
+    fi
 
-To install:
-  App Center > Install Manually" 22 60
+    if [ -n "$qbuild_path" ]; then
+        # QDK found
+        $DIALOG --title "Build QPKG" \
+            --yesno "\
+QDK detected: ${qbuild_path}
+
+Build the .qpkg package now?" 9 55
+        if [ $? -ne 0 ]; then
+            return 0
+        fi
+    else
+        # No QDK - offer options
+        ask --title "Build QPKG" \
+            --menu "No QDK (qbuild) detected." 16 65 3 \
+            "standalone" "Build now without QDK (standalone builder)" \
+            "install"    "Install QDK first, then build" \
+            "skip"       "Skip - I will build later"
+        [ $? -ne 0 ] && return 0
+        local choice
+        choice=$(cat "$TMPFILE")
+
+        case "$choice" in
+            skip)
+                $DIALOG --title "Build Later" --msgbox "\
+To build later:
+  cd ${project_dir}
+  bash build-qpkg.sh" 8 55
+                return 0
+                ;;
+            install)
+                install_qdk || true
+                # Re-check for qbuild after install
+                for p in $(which qbuild 2>/dev/null) \
+                    /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
+                    /opt/QDK/bin/qbuild \
+                    "$HOME/QDK/bin/qbuild"; do
+                    [ -x "$p" ] && qbuild_path="$p" && break
+                done
+                if [ -z "$qbuild_path" ]; then
+                    $DIALOG --title "QDK Install" \
+                        --yesno "QDK install attempted. qbuild still not found.\n\nBuild with standalone builder instead?" 10 55
+                    [ $? -ne 0 ] && return 0
+                fi
+                ;;
+            standalone)
+                # Fall through to build
+                ;;
+        esac
+    fi
+
+    # Run the build
+    $DIALOG --title "Building..." \
+        --infobox "Building .qpkg package...\n\nThis may take a moment." 7 50
+
+    local build_output
+    build_output=$(cd "$project_dir" && bash build-qpkg.sh 2>&1) || true
+
+    # Check if build produced a .qpkg
+    local qpkg_file
+    qpkg_file=$(ls "${project_dir}"/build/*.qpkg 2>/dev/null | head -1)
+
+    if [ -n "$qpkg_file" ] && [ -f "$qpkg_file" ]; then
+        local qpkg_size
+        qpkg_size=$(ls -lh "$qpkg_file" | awk '{print $5}')
+        $DIALOG --title "Build Successful!" --msgbox "\
+QPKG package built successfully!
+
+File: ${qpkg_file}
+Size: ${qpkg_size}
+
+To install on QNAP:
+  1. Copy .qpkg to NAS (scp, SMB, etc.)
+  2. App Center > Install Manually
+  or: sh $(basename "$qpkg_file")" 14 62
+    else
+        # Show build output on failure
+        $DIALOG --title "Build Failed" --msgbox "\
+Build failed. Output:\n\n${build_output}" 20 70
+    fi
+}
+
+install_qdk() {
+    # Detect platform and offer appropriate install method
+    local platform="unknown"
+    if [ -f /etc/config/qpkg.conf ]; then
+        platform="qnap"
+    elif grep -qi microsoft /proc/version 2>/dev/null; then
+        platform="wsl"
+    elif [ -f /etc/debian_version ]; then
+        platform="debian"
+    fi
+
+    case "$platform" in
+        qnap)
+            $DIALOG --title "Install QDK" --msgbox "\
+On QNAP, install QDK from App Center:
+  App Center > Developer Tools > QDK
+
+Or install via command line:
+  /sbin/qpkg_cli -m QDK" 10 55
+            return 1
+            ;;
+        wsl|debian)
+            $DIALOG --title "Install QDK" \
+                --yesno "\
+Install QDK from GitHub?\n\n\
+This will clone qnap-dev/QDK2 to ~/QDK\n\
+and add it to your PATH.\n\n\
+Requires: git" 12 55
+            if [ $? -ne 0 ]; then
+                return 1
+            fi
+
+            if ! command -v git >/dev/null 2>&1; then
+                show_error "git is required but not installed.\n\nsudo apt install git"
+                return 1
+            fi
+
+            $DIALOG --title "Installing QDK" \
+                --infobox "Cloning QDK from GitHub..." 5 45
+
+            if git clone https://github.com/qnap-dev/QDK2.git "$HOME/QDK" 2>/dev/null; then
+                chmod +x "$HOME/QDK/bin/qbuild" 2>/dev/null
+                export PATH="$HOME/QDK/bin:$PATH"
+                $DIALOG --title "QDK Installed" --msgbox "\
+QDK installed to ~/QDK
+
+To make permanent, add to your ~/.bashrc:
+  export PATH=\"\$HOME/QDK/bin:\$PATH\"" 10 55
+                return 0
+            else
+                if [ -d "$HOME/QDK" ]; then
+                    # Already exists
+                    chmod +x "$HOME/QDK/bin/qbuild" 2>/dev/null
+                    export PATH="$HOME/QDK/bin:$PATH"
+                    $DIALOG --title "QDK" --msgbox "~/QDK already exists. Using it." 7 45
+                    return 0
+                fi
+                show_error "Failed to clone QDK repository."
+                return 1
+            fi
+            ;;
+        *)
+            $DIALOG --title "Install QDK" --msgbox "\
+Install QDK manually from:
+  https://github.com/qnap-dev/QDK2
+
+Clone it and add bin/ to your PATH." 9 55
+            return 1
+            ;;
+    esac
 }
 
 # --- Main Flow ---------------------------------------------------------------
