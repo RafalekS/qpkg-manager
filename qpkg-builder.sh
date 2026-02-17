@@ -18,6 +18,7 @@ SCRIPT_VERSION="1.1.0"
 DIALOG=${DIALOG:-dialog}
 TMPFILE=$(mktemp /tmp/qpkg-builder.XXXXXX)
 DEB_TMPDIR=""
+DEB_BIN_RELPATH=""  # Relative path of main binary within .deb data tree
 trap 'rm -f "$TMPFILE"; [ -n "$DEB_TMPDIR" ] && rm -rf "$DEB_TMPDIR"' EXIT
 
 # --- Defaults ----------------------------------------------------------------
@@ -502,6 +503,7 @@ These values will be used as defaults." 16 60
         local exe_path="$exe_list"
         BIN_FILENAME=$(basename "$exe_path")
         BIN_PATH="${DEB_TMPDIR}/data/${exe_path}"
+        DEB_BIN_RELPATH="$exe_path"
 
         $DIALOG --title "Binary Found" \
             --msgbox "Found executable:\n\n${exe_path}\n\nThis will be packaged as: ${BIN_FILENAME}" 12 60
@@ -529,6 +531,7 @@ These values will be used as defaults." 16 60
 
         BIN_FILENAME=$(basename "$selected")
         BIN_PATH="${DEB_TMPDIR}/data/${selected}"
+        DEB_BIN_RELPATH="$selected"
     fi
 
     # Verify the selected binary exists
@@ -636,7 +639,7 @@ screen_summary() {
     case "$BIN_SOURCE" in
         local) bin_info="$BIN_PATH" ;;
         url)   bin_info="Download: $BIN_URL" ;;
-        deb)   bin_info="From .deb: $(basename "${DEB_PATH:-unknown}")" ;;
+        deb)   bin_info="From .deb: $(basename "${DEB_PATH:-unknown}") (full tree)" ;;
         later) bin_info="(manual copy later)" ;;
     esac
 
@@ -743,7 +746,7 @@ QPKG_ROOT=\$(/sbin/getcfg \$QPKG_NAME Install_Path -f \${CONF})
 case "\$1" in
     start)
         echo "\${QPKG_NAME} is a standalone tool, not a service."
-        echo "Binary location: \${QPKG_ROOT}/${BIN_FILENAME}"
+        echo "Binary location: \${QPKG_ROOT}/${DEB_BIN_RELPATH:-$BIN_FILENAME}"
         ;;
     stop)
         echo "\${QPKG_NAME} is a standalone tool, nothing to stop."
@@ -754,7 +757,7 @@ case "\$1" in
     *)
         echo "Usage: \$0 {start|stop|restart}"
         echo "\${QPKG_NAME} is a standalone tool. Run directly:"
-        echo "  \${QPKG_ROOT}/${BIN_FILENAME}"
+        echo "  \${QPKG_ROOT}/${DEB_BIN_RELPATH:-$BIN_FILENAME}"
         ;;
 esac
 exit 0
@@ -774,8 +777,8 @@ generate_daemon_script() {
 CONF="/etc/config/qpkg.conf"
 QPKG_NAME="__PKG_NAME__"
 QPKG_ROOT=$(/sbin/getcfg $QPKG_NAME Install_Path -f ${CONF})
-SVC_BINARY="${QPKG_ROOT}/__BIN_FILENAME__"
-SVC_PID="${QPKG_ROOT}/__BIN_FILENAME__.pid"
+SVC_BINARY="${QPKG_ROOT}/__BIN_RELPATH__"
+SVC_PID="${QPKG_ROOT}/__BIN_NAME__.pid"
 SVC_LOG="${QPKG_ROOT}/log"
 SVC_PORT="__SVC_PORT__"
 SVC_ARGS="__SVC_ARGS__"
@@ -894,7 +897,8 @@ SVCEOF
 
     # Replace placeholders
     sed -i "s|__PKG_NAME__|${PKG_NAME}|g" "$out"
-    sed -i "s|__BIN_FILENAME__|${BIN_FILENAME}|g" "$out"
+    sed -i "s|__BIN_RELPATH__|${DEB_BIN_RELPATH:-$BIN_FILENAME}|g" "$out"
+    sed -i "s|__BIN_NAME__|${BIN_FILENAME}|g" "$out"
     sed -i "s|__SVC_PORT__|${SVC_PORT}|g" "$out"
     sed -i "s|__SVC_ARGS__|${SVC_ARGS}|g" "$out"
     sed -i "s|__RUN_AS_USER__|${RUN_AS_USER}|g" "$out"
@@ -920,7 +924,7 @@ pkg_post_install() {
     QPKG_ROOT=\$(/sbin/getcfg ${PKG_NAME} Install_Path -f /etc/config/qpkg.conf)
 
     # Make binary executable
-    chmod +x "\${QPKG_ROOT}/${BIN_FILENAME}"
+    chmod +x "\${QPKG_ROOT}/${DEB_BIN_RELPATH:-$BIN_FILENAME}"
 
     # Make service script executable
     chmod +x "\${QPKG_ROOT}/${PKG_NAME}.sh"
@@ -999,13 +1003,14 @@ msg() { echo -e "${YELLOW}[BUILD]${NC} $1"; }
 cd "$(dirname "$0")"
 
 # Check binary
-if [ ! -f "x86_64/__BIN_FILENAME__" ]; then
-    err "Binary not found: x86_64/__BIN_FILENAME__"
+BIN_REL="__BIN_RELPATH__"
+if [ ! -f "x86_64/${BIN_REL}" ]; then
+    err "Binary not found: x86_64/${BIN_REL}"
     err "Copy it there before building."
     exit 1
 fi
 
-chmod +x "x86_64/__BIN_FILENAME__"
+chmod +x "x86_64/${BIN_REL}"
 chmod +x "shared/__PKG_NAME__.sh"
 chmod +x "package_routines"
 
@@ -1029,9 +1034,9 @@ build_standalone() {
     # 1. Collect data files (what gets installed to QPKG_ROOT)
     local DATA_DIR="$WORK/data"
     mkdir -p "$DATA_DIR"
-    # Copy binary
-    cp "x86_64/__BIN_FILENAME__" "$DATA_DIR/"
-    chmod +x "$DATA_DIR/__BIN_FILENAME__"
+    # Copy binary / data tree
+    cp -a x86_64/* "$DATA_DIR/"
+    chmod +x "$DATA_DIR/${BIN_REL}"
     # Copy service script
     cp "shared/__PKG_NAME__.sh" "$DATA_DIR/"
     chmod +x "$DATA_DIR/__PKG_NAME__.sh"
@@ -1239,7 +1244,7 @@ echo "  App Center > Install Manually > select .qpkg file"
 echo "  or on NAS:  sh build/__PKG_NAME___*.qpkg"
 BLDEOF
 
-    sed -i "s|__BIN_FILENAME__|${BIN_FILENAME}|g" "$out"
+    sed -i "s|__BIN_RELPATH__|${DEB_BIN_RELPATH:-$BIN_FILENAME}|g" "$out"
     sed -i "s|__PKG_NAME__|${PKG_NAME}|g" "$out"
     sed -i "s|__PKG_DISPLAY__|${PKG_DISPLAY}|g" "$out"
     sed -i "s|__PKG_VER__|${PKG_VERSION}|g" "$out"
@@ -1262,6 +1267,7 @@ BIN_PATH="${BIN_PATH}"
 BIN_URL="${BIN_URL}"
 BIN_FILENAME="${BIN_FILENAME}"
 DEB_PATH="${DEB_PATH}"
+DEB_BIN_RELPATH="${DEB_BIN_RELPATH}"
 SVC_PORT="${SVC_PORT}"
 SVC_ARGS="${SVC_ARGS}"
 RUN_AS_USER="${RUN_AS_USER}"
@@ -1291,7 +1297,12 @@ do_generate() {
 
     # Handle binary
     case "$BIN_SOURCE" in
-        local|deb)
+        deb)
+            # Copy entire extracted .deb data tree (libraries, configs, etc.)
+            cp -a "${DEB_TMPDIR}/data/." "${project_dir}/x86_64/"
+            chmod +x "${project_dir}/x86_64/${DEB_BIN_RELPATH}"
+            ;;
+        local)
             cp "$BIN_PATH" "${project_dir}/x86_64/${BIN_FILENAME}"
             chmod +x "${project_dir}/x86_64/${BIN_FILENAME}"
             ;;
