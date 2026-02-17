@@ -1345,6 +1345,9 @@ screen_build() {
     # Detect qbuild (QDK)
     local qbuild_path=""
     for p in $(which qbuild 2>/dev/null) \
+        /usr/share/QDK/bin/qbuild \
+        /usr/local/share/QDK/bin/qbuild \
+        "$HOME/QDK/bin/qbuild" \
         /share/CACHEDEV1_DATA/.qpkg/QDK/bin/qbuild \
         /opt/QDK/bin/qbuild; do
         [ -x "$p" ] && qbuild_path="$p" && break
